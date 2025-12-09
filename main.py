@@ -1,14 +1,17 @@
 import sqlite3
 import uuid
 import os
-from typing import List, Optional
+from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
+
+# LIBRARY BARU: Untuk pencarian internet real-time
+from duckduckgo_search import DDGS 
 
 # ======================
 # 1. KONFIGURASI
@@ -26,10 +29,31 @@ templates = Jinja2Templates(directory="templates")
 DB_NAME = "chat_history.db"
 
 # ======================
-# 2. DATABASE SYSTEM (SQLite)
+# 2. FUNGSI PENCARIAN (UPDATE BARU)
+# ======================
+def search_web(query: str) -> str:
+    """Mencari informasi terbaru di internet menggunakan DuckDuckGo."""
+    print(f"🔎 Sedang mencari: {query}...") # Info di terminal
+    try:
+        # Mengambil 3 hasil teratas agar tidak terlalu banyak token
+        results = DDGS().text(keywords=query, region='id-id', max_results=3)
+        if not results:
+            return ""
+        
+        # Format hasil pencarian menjadi teks rapi
+        formatted_results = "FAKTA TERBARU DARI INTERNET:\n"
+        for i, res in enumerate(results, 1):
+            formatted_results += f"{i}. {res['title']}: {res['body']}\n"
+            
+        return formatted_results
+    except Exception as e:
+        print(f"Search Error: {e}")
+        return ""
+
+# ======================
+# 3. DATABASE SYSTEM (SQLite)
 # ======================
 def init_db():
-    """Membuat tabel database jika belum ada."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''
@@ -45,7 +69,6 @@ def init_db():
     conn.close()
 
 def save_message(session_id: str, role: str, content: str):
-    """Menyimpan pesan ke database."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", 
@@ -53,61 +76,53 @@ def save_message(session_id: str, role: str, content: str):
     conn.commit()
     conn.close()
 
-def get_history(session_id: str) -> List[dict]:
-    """Mengambil riwayat chat berdasarkan Session ID."""
+def get_history(session_id: str) -> List[Dict[str, str]]:
     conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row # Agar hasil bisa diakses seperti dict
+    conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
     rows = c.fetchall()
     conn.close()
     
-    # Konversi ke format list of dict
-    return [{"role": row["role"], "content": row["content"]} for row in rows]
+    result: List[Dict[str, str]] = []
+    for row in rows:
+        result.append({"role": str(row["role"]), "content": str(row["content"])})
+    return result
 
-# Jalankan inisialisasi DB saat server nyala
 init_db()
 
 # ======================
-# 3. ROUTE: HOME (Frontend)
+# 4. ROUTE: HOME
 # ======================
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    # Cek apakah user sudah punya Session ID (Cookie)
     session_id = request.cookies.get("session_id")
-    
-    # Jika belum punya, kita buatkan ID baru (tapi belum diset ke cookie browser di sini)
+    is_new_user = False
     if not session_id:
         session_id = str(uuid.uuid4())
         is_new_user = True
-    else:
-        is_new_user = False
 
-    # Ambil riwayat chat lama dari Database
-    chat_history = get_history(session_id)
+    chat_history = get_history(session_id) 
 
-    # Render HTML dengan data history
     response = templates.TemplateResponse("index.html", {
         "request": request,
-        "chat_history": chat_history  # Kirim data ke frontend
+        "chat_history": chat_history
     })
 
-    # Jika user baru, tempelkan "stempel" cookie agar dia dikenali kedepannya
     if is_new_user:
-        response.set_cookie(key="session_id", value=session_id, max_age=31536000) # Expire 1 tahun
+        response.set_cookie(key="session_id", value=session_id, max_age=31536000)
 
     return response
 
 
 # ======================
-# 4. ROUTE: API CHAT
+# 5. ROUTE: API CHAT (LOGIKA UTAMA)
 # ======================
 @app.post("/api/chat")
 async def api_chat(request: Request):
-    # Ambil session_id dari cookie pengirim
     session_id = request.cookies.get("session_id")
     if not session_id:
-        return JSONResponse({"error": "Session expired, please refresh page."}, status_code=400)
+        return JSONResponse({"error": "Session expired"}, status_code=400)
 
     data = await request.json()
     user_msg = (data.get("message") or "").strip()
@@ -115,27 +130,48 @@ async def api_chat(request: Request):
     if not user_msg:
         return JSONResponse({"error": "Empty message"}, status_code=400)
 
-    # A. Simpan pesan User ke DB
+    # A. Simpan pesan User
     save_message(session_id, "user", user_msg)
 
-    # B. Siapkan Context untuk OpenAI (Ambil history agar bot ingat)
-    # Kita ambil max 10 pesan terakhir agar hemat token
-    db_history = get_history(session_id)[-10:] 
+    # B. LAKUKAN PENCARIAN INTERNET OTOMATIS
+    # Kita cari info terkait pesan user agar AI tahu konteks terbaru
+    web_context = search_web(user_msg)
+
+    # C. Siapkan System Prompt yang Dinamis
+    system_content = "Kamu adalah asisten AI yang cerdas dan membantu."
     
-    messages_payload = [{"role": "system", "content": "You are a helpful assistant."}]
-    messages_payload.extend(db_history)
+    # Jika ada hasil pencarian, kita paksa AI membacanya
+    if web_context:
+        system_content += f"\n\n[PENTING] Gunakan data berikut untuk menjawab pertanyaan pengguna secara akurat dan realtime:\n{web_context}"
+    else:
+        system_content += "\nJawablah berdasarkan pengetahuanmu sendiri."
+
+    # D. Susun Pesan untuk OpenAI
+    messages_payload: List[ChatCompletionMessageParam] = [
+        {"role": "system", "content": system_content}
+    ]
+    
+    # Masukkan history chat (agar nyambung)
+    db_history = get_history(session_id)[-6:] # Ambil 6 pesan terakhir saja biar cepat
+    for msg in db_history:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "user":
+            messages_payload.append({"role": "user", "content": content})
+        elif role == "assistant":
+            messages_payload.append({"role": "assistant", "content": content})
 
     try:
-        # C. Panggil OpenAI
+        # E. Panggil OpenAI
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages_payload, # type: ignore
-            max_tokens=500
+            messages=messages_payload,
+            max_tokens=800 # Token ditambah agar jawaban lebih lengkap
         )
 
         bot_reply = response.choices[0].message.content or ""
 
-        # D. Simpan pesan Bot ke DB
+        # F. Simpan pesan Bot
         save_message(session_id, "assistant", bot_reply)
 
         return JSONResponse({"reply": bot_reply})
