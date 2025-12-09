@@ -1,192 +1,181 @@
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Pro Chat</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    
-    <style>
-        /* --- STYLE SAMA SEPERTI SEBELUMNYA (MODERN DARK) --- */
-        :root {
-            --primary-gradient: linear-gradient(135deg, #FF3CAC 0%, #784BA0 50%, #2B86C5 100%);
-            --glass-bg: rgba(20, 20, 30, 0.75);
-            --glass-border: rgba(255, 255, 255, 0.1);
-            --bot-bg: rgba(255, 255, 255, 0.08);
-            --user-bg: linear-gradient(90deg, #F6416C 0%, #C56CD6 100%);
-        }
-        body {
-            font-family: 'Outfit', sans-serif;
-            margin: 0; padding: 0; height: 100vh;
-            background: linear-gradient(to right, #24243e, #302b63, #0f0c29);
-            display: flex; align-items: center; justify-content: center;
-        }
-        .chat-card {
-            width: 90%; max-width: 420px; height: 85vh;
-            background: var(--glass-bg);
-            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-            border: 1px solid var(--glass-border);
-            border-radius: 24px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-            display: flex; flex-direction: column; overflow: hidden;
-        }
-        .header {
-            padding: 20px; text-align: center;
-            border-bottom: 1px solid var(--glass-border);
-        }
-        .header h2 {
-            margin: 0; font-size: 1.4rem;
-            background: var(--primary-gradient);
-            -webkit-background-clip: text; background-clip: text;
-            -webkit-text-fill-color: transparent; color: transparent;
-            font-weight: 700;
-        }
-        #chat-box {
-            flex: 1; padding: 20px; overflow-y: auto;
-            display: flex; flex-direction: column; gap: 15px;
-            scroll-behavior: smooth;
-        }
-        #chat-box::-webkit-scrollbar { width: 4px; }
-        #chat-box::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 10px; }
+import sqlite3
+import uuid
+import os
+from typing import List, Dict, Any, Optional
 
-        .msg {
-            max-width: 80%; padding: 12px 16px; border-radius: 14px;
-            font-size: 0.9rem; line-height: 1.5; color: #fff;
-            word-wrap: break-word;
-        }
-        .user {
-            align-self: flex-end; background: var(--user-bg);
-            border-bottom-right-radius: 4px;
-        }
-        .assistant { /* Class dari database 'assistant' kita mapping jadi style bot */
-            align-self: flex-start; background: var(--bot-bg);
-            border: 1px solid var(--glass-border);
-            border-bottom-left-radius: 4px;
-        }
-        /* Markdown Style */
-        .assistant pre { background: rgba(0,0,0,0.5); padding: 10px; border-radius: 8px; overflow-x: auto; margin: 5px 0; }
-        .assistant code { font-family: monospace; background: rgba(255,255,255,0.15); padding: 2px 4px; border-radius: 3px; }
-        .assistant p { margin: 0 0 8px 0; }
-        .assistant p:last-child { margin-bottom: 0; }
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from dotenv import load_dotenv
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
-        .input-area {
-            padding: 15px; background: rgba(0,0,0,0.3);
-            display: flex; gap: 10px;
-        }
-        #user-input {
-            flex: 1; background: rgba(255,255,255,0.1);
-            border: 1px solid var(--glass-border);
-            border-radius: 25px; padding: 12px 20px;
-            color: white; outline: none;
-        }
-        button {
-            width: 45px; height: 45px; border-radius: 50%; border: none;
-            background: var(--primary-gradient); color: white; cursor: pointer;
-            display: flex; align-items: center; justify-content: center;
-            transition: transform 0.2s;
-        }
-        button:hover { transform: scale(1.1); }
-        .typing::after { content: '...'; animation: blink 1.5s infinite; }
-        @keyframes blink { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
-    </style>
-</head>
-<body>
+# LIBRARY BARU: Untuk pencarian internet real-time
+from duckduckgo_search import DDGS 
 
-    <div class="chat-card">
-        <div class="header">
-            <h2>NEXUS PRO</h2>
-            <span style="font-size: 0.75rem; color: #aaa;">History Enabled • Secure</span>
-        </div>
+# ======================
+# 1. KONFIGURASI
+# ======================
+load_dotenv()
+API_KEY = os.getenv("OPENAI_API_KEY")
 
-        <div id="chat-box">
-            {% for msg in chat_history %}
-                <div class="msg {{ msg.role }}" data-content="{{ msg.content }}">
-                    </div>
-            {% endfor %}
+if not API_KEY:
+    raise ValueError("❌ OPENAI_API_KEY tidak ditemukan di .env")
 
-            {% if not chat_history %}
-            <div class="msg assistant">
-                Halo! Saya ingat semua percakapan kita. Apa yang ingin dibahas?
-            </div>
-            {% endif %}
-        </div>
+client = OpenAI(api_key=API_KEY)
 
-        <div class="input-area">
-            <input type="text" id="user-input" placeholder="Ketik sesuatu..." autocomplete="off">
-            <button onclick="sendMessage()">➤</button>
-        </div>
-    </div>
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+DB_NAME = "chat_history.db"
 
-<script>
-    const chatBox = document.getElementById("chat-box");
-    const userInput = document.getElementById("user-input");
-
-    // FUNGSI 1: Render Markdown untuk pesan lama (History)
-    // Kita jalankan saat halaman selesai loading
-    window.onload = function() {
-        const messages = document.querySelectorAll('.msg');
-        messages.forEach(msgDiv => {
-            const rawContent = msgDiv.getAttribute('data-content');
-            if (rawContent) {
-                // Parse markdown
-                msgDiv.innerHTML = marked.parse(rawContent);
-            }
-        });
-        // Scroll ke paling bawah
-        chatBox.scrollTop = chatBox.scrollHeight;
-    };
-
-    function addMessage(text, role) {
-        const div = document.createElement("div");
-        div.classList.add("msg", role); // role: 'user' atau 'assistant'
+# ======================
+# 2. FUNGSI PENCARIAN (UPDATE BARU)
+# ======================
+def search_web(query: str) -> str:
+    """Mencari informasi terbaru di internet menggunakan DuckDuckGo."""
+    print(f"🔎 Sedang mencari: {query}...") # Info di terminal
+    try:
+        # Mengambil 3 hasil teratas agar tidak terlalu banyak token
+        results = DDGS().text(keywords=query, region='id-id', max_results=3)
+        if not results:
+            return ""
         
-        if (role === 'assistant') {
-            div.innerHTML = marked.parse(text);
-        } else {
-            div.textContent = text;
-        }
-        
-        chatBox.appendChild(div);
-        chatBox.scrollTop = chatBox.scrollHeight;
-        return div;
-    }
-
-    async function sendMessage() {
-        const msg = userInput.value.trim();
-        if (!msg) return;
-
-        addMessage(msg, "user");
-        userInput.value = "";
-        userInput.focus();
-
-        const loadingDiv = addMessage("", "assistant");
-        loadingDiv.innerHTML = "<span class='typing'>Sedang berpikir</span>";
-
-        try {
-            const res = await fetch("/api/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ message: msg })
-            });
+        # Format hasil pencarian menjadi teks rapi
+        formatted_results = "FAKTA TERBARU DARI INTERNET:\n"
+        for i, res in enumerate(results, 1):
+            formatted_results += f"{i}. {res['title']}: {res['body']}\n"
             
-            const data = await res.json();
+        return formatted_results
+    except Exception as e:
+        print(f"Search Error: {e}")
+        return ""
 
-            if (res.ok && data.reply) {
-                loadingDiv.innerHTML = marked.parse(data.reply);
-            } else {
-                loadingDiv.innerHTML = "Error: " + (data.error || "Unknown");
-            }
-        } catch (err) {
-            loadingDiv.innerHTML = "Gagal koneksi server.";
-        }
-        chatBox.scrollTop = chatBox.scrollHeight;
-    }
+# ======================
+# 3. DATABASE SYSTEM (SQLite)
+# ======================
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-    userInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") sendMessage();
-    });
-</script>
+def save_message(session_id: str, role: str, content: str):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)", 
+              (session_id, role, content))
+    conn.commit()
+    conn.close()
 
-</body>
-</html>
+def get_history(session_id: str) -> List[Dict[str, str]]:
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC", (session_id,))
+    rows = c.fetchall()
+    conn.close()
+    
+    result: List[Dict[str, str]] = []
+    for row in rows:
+        result.append({"role": str(row["role"]), "content": str(row["content"])})
+    return result
+
+init_db()
+
+# ======================
+# 4. ROUTE: HOME
+# ======================
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    session_id = request.cookies.get("session_id")
+    is_new_user = False
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        is_new_user = True
+
+    chat_history = get_history(session_id) 
+
+    response = templates.TemplateResponse("index.html", {
+        "request": request,
+        "chat_history": chat_history
+    })
+
+    if is_new_user:
+        response.set_cookie(key="session_id", value=session_id, max_age=31536000)
+
+    return response
+
+
+# ======================
+# 5. ROUTE: API CHAT (LOGIKA UTAMA)
+# ======================
+@app.post("/api/chat")
+async def api_chat(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        return JSONResponse({"error": "Session expired"}, status_code=400)
+
+    data = await request.json()
+    user_msg = (data.get("message") or "").strip()
+
+    if not user_msg:
+        return JSONResponse({"error": "Empty message"}, status_code=400)
+
+    # A. Simpan pesan User
+    save_message(session_id, "user", user_msg)
+
+    # B. LAKUKAN PENCARIAN INTERNET OTOMATIS
+    # Kita cari info terkait pesan user agar AI tahu konteks terbaru
+    web_context = search_web(user_msg)
+
+    # C. Siapkan System Prompt yang Dinamis
+    system_content = "Kamu adalah asisten AI yang cerdas dan membantu."
+    
+    # Jika ada hasil pencarian, kita paksa AI membacanya
+    if web_context:
+        system_content += f"\n\n[PENTING] Gunakan data berikut untuk menjawab pertanyaan pengguna secara akurat dan realtime:\n{web_context}"
+    else:
+        system_content += "\nJawablah berdasarkan pengetahuanmu sendiri."
+
+    # D. Susun Pesan untuk OpenAI
+    messages_payload: List[ChatCompletionMessageParam] = [
+        {"role": "system", "content": system_content}
+    ]
+    
+    # Masukkan history chat (agar nyambung)
+    db_history = get_history(session_id)[-6:] # Ambil 6 pesan terakhir saja biar cepat
+    for msg in db_history:
+        role = msg["role"]
+        content = msg["content"]
+        if role == "user":
+            messages_payload.append({"role": "user", "content": content})
+        elif role == "assistant":
+            messages_payload.append({"role": "assistant", "content": content})
+
+    try:
+        # E. Panggil OpenAI
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages_payload,
+            max_tokens=800 # Token ditambah agar jawaban lebih lengkap
+        )
+
+        bot_reply = response.choices[0].message.content or ""
+
+        # F. Simpan pesan Bot
+        save_message(session_id, "assistant", bot_reply)
+
+        return JSONResponse({"reply": bot_reply})
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
